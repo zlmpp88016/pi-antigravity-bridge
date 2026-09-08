@@ -149,6 +149,13 @@ export class AgyDriver implements TurnDriver {
 		lastRecycleReason: undefined as string | undefined,
 		recycleReasons: {} as Record<string, number>,
 	};
+	/** Conversation ids whose process died unexpectedly (foreign close, open
+	 *  turn, no result frame). Requesting one again starts fresh instead of
+	 *  resuming into the same death. Keyed by conversation, not by pi session:
+	 *  a retry that resolves to a different store key must still not resume
+	 *  the dead id. Bounded; entries never come back alive (we never send
+	 *  them again), so plain eviction is safe. */
+	#taintedConversations: string[] = [];
 
 	get state(): DriverState {
 		return this.#state;
@@ -221,6 +228,14 @@ export class AgyDriver implements TurnDriver {
 		if (this.#shutdown) throw new Error("agy driver is shut down.");
 		if (request.signal?.aborted) throw new Error("aborted before start");
 
+		// Never resume a conversation whose process died unexpectedly: the id
+		// may point straight back at the death (silent instant exit on resume
+		// loops the retry). Drop it before the recycle check so the turn below
+		// starts fresh.
+		if (request.conversationId && this.#taintedConversations.includes(request.conversationId)) {
+			this.#log(`tainted-conversation:${request.conversationId}->fresh`);
+			request = { ...request, conversationId: null };
+		}
 		const cause = this.#recycleCause(request);
 		if (cause) await this.close("recycle", cause);
 		else if (this.#child) this.#stats.reused += 1;
@@ -370,14 +385,22 @@ export class AgyDriver implements TurnDriver {
 		});
 		child.on("exit", (code) => {
 			if (generation !== this.#generation) return;
+			// Logging only - the turn is NOT settled here. An instantly-dying
+			// child can emit "exit" before its final stdout reaches us; settling
+			// here turned agy's real last error into a bare
+			// "agy exited with status N". "close" below fires after stdio
+			// flushes and is the decision point.
+			this.#log(`exit:${code ?? "signal"}`);
+		});
+		child.on("close", (code) => {
+			if (generation !== this.#generation) return;
 			const turn = this.#active;
 			// A dying process often leaves its last line unterminated: it sits in
 			// #stdoutBuf because no newline ever arrives to flush it. Replaying it
-			// before deciding the turn failed keeps agy's real final error in the
-			// transcript; dropping it downgraded every such death to a bare
-			// "agy exited with status N" with an empty stderr. parseAgyLine is
-			// total (never throws): a truncated line parses as "unknown" and is
-			// ignored, a complete error-result line settles the turn properly.
+			// now (stdio is flushed) keeps agy's real final error in the
+			// transcript. parseAgyLine is total (never throws): a truncated line
+			// parses as "unknown" and is ignored, a complete error-result line
+			// settles the turn properly.
 			const tail = this.#stdoutBuf;
 			this.#stdoutBuf = "";
 			if (tail.trim() && turn && !turn.closed) {
@@ -385,7 +408,7 @@ export class AgyDriver implements TurnDriver {
 			}
 			this.#child = undefined;
 			this.#state = "dead";
-			this.#log(`exit:${code ?? "signal"}`);
+			this.#log(`close:${code ?? "signal"}`);
 			if (turn && !turn.closed) {
 				if (turn.sawResult) {
 					this.#settle(turn, {
@@ -397,13 +420,20 @@ export class AgyDriver implements TurnDriver {
 						aborted: false,
 					});
 				} else {
+					// Taint before failing: any later turn asking for this id goes
+					// fresh (see #runExclusive), even across pi session keys. Taint
+					// both the turn's latest id and the child binding: a death
+					// before the first init frame leaves turn.conversationId empty
+					// while the requested (stored) id is the poisoned one.
+					if (turn.conversationId) this.#taintConversation(turn.conversationId);
+					if (this.#boundConversation) this.#taintConversation(this.#boundConversation);
 					this.#failTurn(
 						turn,
 						this.#stderrTail.trim() || `agy exited with status ${code ?? "signal"}`,
-						// Foreign death: the child exited on its own with the turn open
+						// Foreign death: the child died on its own with the turn open
 						// and no result frame (not one of our kills - those fail the
-						// turn before the exit event can arrive). The provider treats
-						// the stored conversation as suspect and resets it.
+						// turn before any exit/close event can arrive). The provider
+						// treats the stored conversation as suspect and resets it.
 						{ unexpectedDeath: true },
 					);
 				}
@@ -578,6 +608,13 @@ export class AgyDriver implements TurnDriver {
 		} catch {
 			/* listener errors must not break settling */
 		}
+	}
+
+	/** Remember a conversation id as resume-poisoned (bounded). */
+	#taintConversation(id: string): void {
+		if (this.#taintedConversations.includes(id)) return;
+		this.#taintedConversations.push(id);
+		if (this.#taintedConversations.length > 20) this.#taintedConversations.shift();
 	}
 
 	#failTurn(turn: ActiveTurn, message: string, opts?: { unexpectedDeath?: boolean }): void {
