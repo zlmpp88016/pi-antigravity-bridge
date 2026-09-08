@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- A retry after a failed turn no longer dies with "No user message to send to agy." pi re-calls the provider with the SAME context when a turn ends in error, so the tail is the dying assistant block, not a user message; `extractUserPrompt` read the last message only, returned null, and the pass hard-errored. One upstream agy timeout ("timeout waiting for response", emitted by the `agy` binary itself and not tunable from the bridge) was therefore escalated into an unrecoverable, session-poisoning error. The pass that would otherwise hard-error now scans back to the newest user message and re-sends it - agy keeps its own history, so the resend IS the retry - and images ride the same lookup. Scoped to that pass: fresh turns and late tool deliveries keep reading the last message only, so a prompt agy is still working through never rides along with a late result. New `prompt-resend` log event. Regression tests: `tests/provider-retry.test.ts`.
+
 ## [1.4.9] - 2026-09-05
 
 ### Added

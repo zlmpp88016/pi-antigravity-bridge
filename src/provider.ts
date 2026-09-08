@@ -54,11 +54,12 @@ function zeroUsage(): Usage {
 	};
 }
 
-/** Extract the latest user message as a flat prompt string. agy maintains its
- *  own conversation history via --conversation, so we collapse pi's structured
- *  message to text. Returns null if the last message isn't a user message. */
-function extractUserPrompt(context: Context): string | null {
-	const last = context.messages[context.messages.length - 1];
+/** Read one message's text as a flat prompt string, or null when the index does
+ *  not point at a user message. agy maintains its own conversation history via
+ *  --conversation, so we collapse pi's structured message to text: the newest
+ *  user turn is the only increment agy has not seen. */
+function extractUserPrompt(context: Context, at: number): string | null {
+	const last = context.messages[at];
 	if (!last || last.role !== "user") return null;
 	const content = last.content;
 	if (typeof content === "string") return content;
@@ -70,11 +71,17 @@ function extractUserPrompt(context: Context): string | null {
 		.trim() || null;
 }
 
-/** Image blocks of the latest user message (pi-ai ImageContent: base64 data
- *  + mimeType). The ACP engine forwards them as typed content blocks; the
- *  legacy CLI prompt is text-only, so its driver simply ignores these. */
-function extractImages(context: Context): Array<{ data: string; mimeType: string }> {
-	const last = context.messages[context.messages.length - 1];
+/** Index of the newest user message, or -1 when the context holds none. */
+function lastUserIndex(messages: Message[]): number {
+	for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") return i;
+	return -1;
+}
+
+/** Image blocks of a user message (pi-ai ImageContent: base64 data + mimeType).
+ *  The ACP engine forwards them as typed content blocks; the legacy CLI prompt
+ *  is text-only, so its driver simply ignores these. */
+function extractImages(context: Context, at: number): Array<{ data: string; mimeType: string }> {
+	const last = context.messages[at];
 	if (!last || last.role !== "user" || typeof last.content === "string") return [];
 	return last.content
 		.filter((b): b is { type: "image"; data: string; mimeType: string } => b.type === "image")
@@ -1065,8 +1072,27 @@ async function runTurnDriver(
 		}
 		handle = active;
 	} else {
-		const prompt = extractUserPrompt(context);
-		const images = extractImages(context);
+		let at = context.messages.length - 1;
+		let prompt = extractUserPrompt(context, at);
+		let images = extractImages(context, at);
+		// Retry after a failed turn. pi re-calls the provider with the SAME context
+		// when a turn died, so the tail is the dying assistant block rather than a
+		// user message, and nothing new arrived to send. agy keeps its own history,
+		// so re-sending the newest user prompt IS the retry; before this, one
+		// upstream agy error ("timeout waiting for response") was upgraded into a
+		// hard, unrecoverable "No user message to send to agy."
+		//
+		// Scoped to the pass that would otherwise hard-error: fresh turns and late
+		// tool deliveries keep reading the last message only, so a prompt agy is
+		// still working through never rides along with a late result.
+		if (!prompt && images.length === 0 && late.length === 0) {
+			at = lastUserIndex(context.messages);
+			prompt = extractUserPrompt(context, at);
+			images = extractImages(context, at);
+			if (prompt || images.length > 0) {
+				deps.log?.("prompt-resend", { index: at, messageCount }, "info");
+			}
+		}
 		// An image-only message (no text) is valid on the ACP engine; only fail
 		// when there is nothing at all to send (no text, no images, no late
 		// tool results to deliver).

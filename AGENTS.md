@@ -3,7 +3,7 @@ Stack: **TypeScript / Node.js (ESNext / ES2022, ESM module)** targeting Node.js 
 
 ## STRUCTURE
 *   `src/`: Core implementation modules
-    *   `provider.ts`: Main `pi` custom provider: streaming event loop, G9 no-patch round-trip store (escalation-aware: slow bridge calls early-ack with a poll handle at ~20s and re-arm to a 30 min TTL; failed parks leave tombstones for late-delivery re-routing), G1 context digest (off by default; inline on stream-json, `embeddedContext` resource block on ACP). Consumes the `TurnDriver` interface only; engine selection is per-call from config.
+    *   `provider.ts`: Main `pi` custom provider: streaming event loop, G9 no-patch round-trip store (escalation-aware: slow bridge calls early-ack with a poll handle at ~20s and re-arm to a 30 min TTL; failed parks leave tombstones for late-delivery re-routing), G1 context digest (off by default; inline on stream-json, `embeddedContext` resource block on ACP), retry-after-error (a pass that would hard-error falls back to the newest user message and re-sends it, so an upstream agy failure is not turned into "No user message to send to agy."). Consumes the `TurnDriver` interface only; engine selection is per-call from config.
     *   `driver-types.ts`: Engine-agnostic `TurnDriver` contract (request/handle/snapshot types). Everything above the drivers depends on this only.
     *   `driver.ts`: Stream-json driver (DEFAULT engine): one persistent `agy --input-format stream-json --output-format stream-json` process, turn serialization, recycle on profile drift, conversation binding, idle/abort timers.
     *   `daily-log.ts`: Daily NDJSON support log (`~/.pi/extensions-data/estebanforge/pi-antigravity-bridge/logs/<YYYY-MM-DD>.ndjson`): error-only by default (zero routine disk writes; warns toast in the pi UI instead), full trail needs `AGY_DEBUG`, 14-day retention, secret redaction, never throws. Fed by both drivers, the bridge, round-trips, `/agy`, and `ask-tool`.
@@ -23,7 +23,7 @@ Stack: **TypeScript / Node.js (ESNext / ES2022, ESM module)** targeting Node.js 
     *   `sessions.ts`: Persisted mapping of `pi` session IDs to agy conversation/session IDs. Engine-scoped KEYS (`sid:<x>` streaming, `sid:<x>@acp`) so engine switches never cross conversations.
 *   `extensions/`: `pi` extension entry point (`index.ts`): provider registration, dual-driver wiring, bridge `mcpServers` registration with the token header, `/agy` command (engine, auth, auth-manual, doctor), bridge lifecycle notices.
 *   `scripts/`: Utility scripts for development (`smoke-in-pi.sh`, `smoke-stream-json.mjs`, `smoke-acp.mjs`, `smoke-acp-bridge.mjs`, `smoke-acp-image.mjs`, `parity-live.mjs`, `probe-acp-phase2.mjs`, `test-provider.ts`, `test-extension.ts`).
-*   `tests/`: Test suite run by Vitest (168 tests). ACP suites: `acp-jsonrpc` (framing), `acp-events` (mapping incl. probe-frame regressions), `acp-driver` (fake server in `tests/helpers/fake-acp-server.mjs`), `acp-config` (engine narrowing).
+*   `tests/`: Test suite run by Vitest (253 tests). ACP suites: `acp-jsonrpc` (framing), `acp-events` (mapping incl. probe-frame regressions), `acp-driver` (fake server in `tests/helpers/fake-acp-server.mjs`), `acp-config` (engine narrowing). Provider suites: `provider-retry` (backscan resend after a failed turn), `provider-late-result` (tombstone re-routing).
 
 ## COMMANDS
 | Action | Command |
