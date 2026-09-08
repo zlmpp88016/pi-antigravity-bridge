@@ -1167,7 +1167,15 @@ async function runTurnDriver(
 	}
 
 	const outcome = await handle.outcome;
-	if (outcome.conversationId) {
+	if (outcome.unexpectedDeath) {
+		// The agy process died on its own mid-turn (foreign exit, no result
+		// frame). The stored conversation id may point straight back at the
+		// death - resuming it would loop on instant exits - so the next attempt
+		// starts a fresh conversation. The retry backscan above re-sends the
+		// newest user prompt, so the retry stays meaningful.
+		store.remove(key);
+		deps.log?.("conversation-reset", { reason: "unexpected-death" }, "warn");
+	} else if (outcome.conversationId) {
 		store.set(key, {
 			conversationId: outcome.conversationId,
 			lastStepIdx: -1,

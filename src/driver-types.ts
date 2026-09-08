@@ -83,6 +83,12 @@ export interface TurnOutcome {
 	usage?: AgyUsage;
 	finished: boolean;
 	aborted: boolean;
+	/** The child died on its own (exit event) with the turn open and no result
+	 *  frame - not one of the driver's own kills. The provider treats the
+	 *  stored conversation binding as suspect and resets it, so the next
+	 *  attempt starts a fresh conversation instead of resuming into the same
+	 *  death. Set only on that path; absent everywhere else. */
+	unexpectedDeath?: boolean;
 }
 
 export interface TurnHandle {

@@ -371,6 +371,18 @@ export class AgyDriver implements TurnDriver {
 		child.on("exit", (code) => {
 			if (generation !== this.#generation) return;
 			const turn = this.#active;
+			// A dying process often leaves its last line unterminated: it sits in
+			// #stdoutBuf because no newline ever arrives to flush it. Replaying it
+			// before deciding the turn failed keeps agy's real final error in the
+			// transcript; dropping it downgraded every such death to a bare
+			// "agy exited with status N" with an empty stderr. parseAgyLine is
+			// total (never throws): a truncated line parses as "unknown" and is
+			// ignored, a complete error-result line settles the turn properly.
+			const tail = this.#stdoutBuf;
+			this.#stdoutBuf = "";
+			if (tail.trim() && turn && !turn.closed) {
+				this.#applyParsed(turn, parseAgyLine(tail));
+			}
 			this.#child = undefined;
 			this.#state = "dead";
 			this.#log(`exit:${code ?? "signal"}`);
@@ -388,6 +400,11 @@ export class AgyDriver implements TurnDriver {
 					this.#failTurn(
 						turn,
 						this.#stderrTail.trim() || `agy exited with status ${code ?? "signal"}`,
+						// Foreign death: the child exited on its own with the turn open
+						// and no result frame (not one of our kills - those fail the
+						// turn before the exit event can arrive). The provider treats
+						// the stored conversation as suspect and resets it.
+						{ unexpectedDeath: true },
 					);
 				}
 			}
@@ -563,7 +580,7 @@ export class AgyDriver implements TurnDriver {
 		}
 	}
 
-	#failTurn(turn: ActiveTurn, message: string): void {
+	#failTurn(turn: ActiveTurn, message: string, opts?: { unexpectedDeath?: boolean }): void {
 		this.#settle(turn, {
 			conversationId: turn.conversationId,
 			status: "ERROR",
@@ -572,6 +589,9 @@ export class AgyDriver implements TurnDriver {
 			usage: turn.usage,
 			finished: true,
 			aborted: false,
+			// Set only when true: keeps outcome objects shape-stable for the
+				// normal paths (and their deepEqual assertions).
+				...(opts?.unexpectedDeath ? { unexpectedDeath: true as const } : {}),
 		});
 	}
 

@@ -68,6 +68,9 @@ export class SessionStore {
 	private readonly path: string;
 	private cache: StoreMap = {};
 	private readonly dirty = new Set<string>();
+	/** Keys deleted since the last persist (remove()): persist() must delete
+	 *  them from the on-disk merge too, or the next load resurrects them. */
+	private readonly removed = new Set<string>();
 	private writeChain: Promise<void> = Promise.resolve();
 
 	constructor(storePath: string = STORE_PATH) {
@@ -100,11 +103,28 @@ export class SessionStore {
 	set(key: string, session: AgySession): void {
 		this.cache[key] = session;
 		this.dirty.add(key);
+		this.removed.delete(key);
 		// Serialize through a chain so concurrent sets don't interleave renames.
 		this.writeChain = this.writeChain
 			.then(() => this.persist())
 			.catch(() => {
 				/* swallow; next set() retries */
+			});
+	}
+
+	/** Drop one session binding and persist the deletion. Used when the agy
+	 *  process died unexpectedly mid-turn: the stored conversation id may
+	 *  point straight back at the death, so the next attempt starts a fresh
+	 *  conversation instead of resuming into it. A no-op for unknown keys. */
+	remove(key: string): void {
+		if (!(key in this.cache)) return;
+		delete this.cache[key];
+		this.dirty.delete(key);
+		this.removed.add(key);
+		this.writeChain = this.writeChain
+			.then(() => this.persist())
+			.catch(() => {
+				/* swallow; next mutation retries */
 			});
 	}
 
@@ -126,6 +146,9 @@ export class SessionStore {
 		for (const key of this.dirty) {
 			merged[key] = this.cache[key];
 		}
+		for (const key of this.removed) {
+			delete merged[key];
+		}
 
 		const tmp = `${this.path}.${process.pid}.tmp`;
 		await fs.promises.writeFile(tmp, JSON.stringify(merged, null, 2) + "\n", {
@@ -133,6 +156,7 @@ export class SessionStore {
 		});
 		await fs.promises.rename(tmp, this.path);
 		this.dirty.clear();
+		this.removed.clear();
 	}
 
 	/** Wipe all session bindings (forces fresh agy conversations on every
@@ -140,6 +164,7 @@ export class SessionStore {
 	clear(): void {
 		this.cache = {};
 		this.dirty.clear();
+		this.removed.clear();
 		this.writeChain = this.writeChain
 			.then(async () => {
 				const tmp = `${this.path}.${process.pid}.tmp`;
@@ -155,5 +180,11 @@ export class SessionStore {
 	/** Count persisted session bindings (for status display). */
 	get size(): number {
 		return Object.keys(this.cache).length;
+	}
+
+	/** Resolves once every queued write settled (tests, shutdown). Mirrors the
+	 *  daily logger's flush contract. */
+	async flush(): Promise<void> {
+		await this.writeChain;
 	}
 }

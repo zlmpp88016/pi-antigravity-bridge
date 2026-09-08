@@ -64,3 +64,43 @@ test("SessionStore: top-level non-object file is treated as empty", () => {
 	const store = new SessionStore(p);
 	assert.equal(store.size, 0);
 });
+
+test("SessionStore: remove drops the binding in memory", () => {
+	const store = new SessionStore(tmpStorePath());
+	store.set("k", { conversationId: "c-1", lastStepIdx: 3 });
+	assert.equal(store.size, 1);
+	store.remove("k");
+	assert.equal(store.get("k"), null);
+	assert.equal(store.size, 0);
+});
+
+test("SessionStore: remove of an unknown key is a no-op", async () => {
+	const store = new SessionStore(tmpStorePath());
+	store.set("k", { conversationId: "c-1", lastStepIdx: 3 });
+	store.remove("missing");
+	await store.flush();
+	assert.deepEqual(store.get("k"), { conversationId: "c-1", lastStepIdx: 3, lastMessageCount: 0 });
+});
+
+test("SessionStore: remove persists the deletion (no resurrection on reload)", async () => {
+	const p = tmpStorePath();
+	const store = new SessionStore(p);
+	store.set("k", { conversationId: "c-1", lastStepIdx: 3 });
+	store.set("other", { conversationId: "c-2", lastStepIdx: 0 });
+	store.remove("k");
+	await store.flush();
+	const reloaded = new SessionStore(p);
+	assert.equal(reloaded.get("k"), null);
+	assert.deepEqual(reloaded.get("other"), { conversationId: "c-2", lastStepIdx: 0, lastMessageCount: 0 });
+});
+
+test("SessionStore: set after remove wins", async () => {
+	const p = tmpStorePath();
+	const store = new SessionStore(p);
+	store.set("k", { conversationId: "c-old", lastStepIdx: 1 });
+	store.remove("k");
+	store.set("k", { conversationId: "c-new", lastStepIdx: 2 });
+	await store.flush();
+	const reloaded = new SessionStore(p);
+	assert.deepEqual(reloaded.get("k"), { conversationId: "c-new", lastStepIdx: 2, lastMessageCount: 0 });
+});

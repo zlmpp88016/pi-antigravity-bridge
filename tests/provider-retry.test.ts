@@ -184,6 +184,55 @@ test("retry: a context with no user message at all still reports it plainly", as
 	assert.equal(errors[0].errorMessage, "No user message to send to agy.");
 });
 
+test("retry: unexpected child death resets the stored conversation binding", async () => {
+	const storePath = tmpStorePath();
+	const store = new SessionStore(storePath);
+	// A binding from an earlier healthy turn.
+	store.set("sid:retry-death", { conversationId: "old-conv", lastStepIdx: 0, lastMessageCount: 1 });
+	// The driver reports the child died on its own mid-turn.
+	const deadHandle = {
+		id: "dead-turn",
+		outcome: Promise.resolve({
+			status: "ERROR" as const,
+			response: "",
+			error: "agy exited with status 1",
+			conversationId: "old-conv",
+			unexpectedDeath: true,
+			finished: true,
+			aborted: false,
+		}),
+		next: async (): Promise<DriverActivity | null> => null,
+		pushExternal: (_a: DriverActivity) => {},
+	};
+	const deadDriver = {
+		get activeHandle() {
+			return null;
+		},
+		kickIdle: () => {},
+		reentry: () => null,
+		run: async (_opts: DriverTurnRequest) => deadHandle,
+	} as unknown as AgyDriver;
+	const streamSimple = createStreamSimple({
+		entries: [{ full: "gemini-3.6-flash", id: "gemini-flash" }],
+		store,
+		driver: deadDriver,
+		roundTrips: new ToolRoundTrips(deadDriver),
+	});
+	const context: Context = {
+		systemPrompt: undefined,
+		messages: [{ role: "user", content: "log every mq consume", timestamp: Date.now() }],
+	};
+	const retryOptions = { cwd: process.cwd(), sessionId: "retry-death" } as unknown as SimpleStreamOptions;
+
+	const errors = await collect(streamSimple(model, context, retryOptions));
+
+	// The turn still reports the death, but the suspect binding is gone: the
+	// next attempt spawns a fresh conversation instead of resuming into it.
+	assert.equal(errors.length, 1);
+	assert.equal(errors[0].errorMessage, "agy exited with status 1");
+	assert.equal(store.get("sid:retry-death"), null);
+});
+
 test("retry: late tool delivery does not resurrect the already-consumed prompt", async () => {
 	const calls: DriverTurnRequest[] = [];
 	const driver = fakeDriver(calls);
