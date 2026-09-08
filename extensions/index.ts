@@ -300,9 +300,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		fileLog.log(
 			"turn-end",
 			// Error text can embed the child's stderr tail; cap it in line with
-			// the ACP driver's 200-char stderr slices.
+			// the ACP driver's 200-char stderr slices. ERROR outcomes log at
+			// error level so they land on disk under the default error-only
+			// tier (warns toast but are dropped) - a failed turn with no disk
+			// trail is undebuggable. Aborts stay warn (routine user action).
 			{ status: outcome.status, error: outcome.error?.slice(0, 500), aborted: outcome.aborted },
-			outcome.status === "OK" ? "info" : "warn",
+			outcome.status === "OK" ? "info" : outcome.aborted ? "warn" : "error",
 		);
 		roundTrips.failAll("antigravity turn ended with an unresolved pi tool call");
 	};

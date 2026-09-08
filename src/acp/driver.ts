@@ -121,6 +121,8 @@ export class AcpDriver implements TurnDriver {
 		kills: 0,
 	};
 	#serverVersion: string | undefined;
+	/** Session ids marked resume-poisoned via taintConversation (bounded). */
+	#taintedSessions: string[] = [];
 	#lastSessionId: string | undefined;
 	#lastCancelSupported: boolean | null = null;
 	#agentInfo: { name?: string; title?: string } | undefined;
@@ -154,6 +156,14 @@ export class AcpDriver implements TurnDriver {
 			this.#pauseOverall(t);
 		}
 		this.#emit(t, activity);
+	}
+
+	/** Mark a session id as resume-poisoned (bounded, max 20). Later turns
+	 *  asking for it start fresh instead of loading it. */
+	taintConversation(id: string): void {
+		if (this.#taintedSessions.includes(id)) return;
+		this.#taintedSessions.push(id);
+		if (this.#taintedSessions.length > 20) this.#taintedSessions.shift();
 	}
 
 	kickIdle(): void {
@@ -232,12 +242,13 @@ export class AcpDriver implements TurnDriver {
 		// Session: load (resume) or create. Load failures fall back to a fresh
 		// session — a missing conversation must not fail the turn (9.4).
 		try {
-			if (request.conversationId) {
+			if (request.conversationId && !this.#taintedSessions.includes(request.conversationId)) {
 				this.#log("session-load", { sessionId: request.conversationId });
 				this.#stats.sessionsLoaded += 1;
 				await conn.loadSession(request.conversationId, request.cwd);
 				turn.sessionId = request.conversationId;
 			} else {
+				if (request.conversationId) this.#log("tainted-session-fresh", { sessionId: request.conversationId });
 				const created = await conn.newSession(request.cwd);
 				turn.sessionId = created.sessionId;
 				this.#stats.sessionsCreated += 1;

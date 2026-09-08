@@ -610,6 +610,13 @@ export class AgyDriver implements TurnDriver {
 		}
 	}
 
+	/** Remember a conversation id as resume-poisoned (bounded). Public for
+	 *  provider-level poison signals (repeated transient upstream failures);
+	 *  death-taint keeps using it internally. */
+	taintConversation(id: string): void {
+		this.#taintConversation(id);
+	}
+
 	/** Remember a conversation id as resume-poisoned (bounded). */
 	#taintConversation(id: string): void {
 		if (this.#taintedConversations.includes(id)) return;

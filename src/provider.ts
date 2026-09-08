@@ -815,6 +815,33 @@ export function buildLateResultPrompt(late: LateToolResult[], userPrompt?: strin
 	return userPrompt ? `${body}\n\n${userPrompt}` : body;
 }
 
+// --- Transient-upstream retry guard ------------------------------------------
+//
+// agy's own request errors ("timeout waiting for response", emitted by the
+// agy binary when its upstream model call dies) arrive as ERROR result frames
+// on an otherwise healthy child. The retry pass then re-sends the newest user
+// prompt into the SAME stored conversation, replaying the same giant prompt
+// into the same timeout - a deterministic poison loop ("Retry failed after N
+// attempts"). Break it: the second CONSECUTIVE transient failure on one
+// conversation taints it, unbinds the pi session, and recycles the child, so
+// the next attempt starts fresh with just the newest user prompt. A single
+// blip still retries in place (history preserved); OK turns reset the count.
+
+const TRANSIENT_UPSTREAM_RE =
+	/timeout waiting for response|timed out|deadline exceeded|temporarily unavailable|overloaded|try again|bad gateway|service unavailable|gateway timeout|econnreset|socket hang up/i;
+
+/** Consecutive transient-upstream failures per conversation id. Module-level:
+ *  retries land on new runTurnDriver invocations but the same conversation. */
+const transientFailures = new Map<string, number>();
+
+/** True when an agy turn error looks like a transient upstream failure (model
+ *  request timeout / 5xx / connection reset) rather than a fatal turn error.
+ *  Exported for unit testing. */
+export function isTransientUpstreamError(message: string | undefined): boolean {
+	if (!message) return false;
+	return TRANSIENT_UPSTREAM_RE.test(message);
+}
+
 // --- stream-json engine -------------------------------------------------------
 
 export interface DriverDeps {
@@ -1174,6 +1201,7 @@ async function runTurnDriver(
 		// starts a fresh conversation. The retry backscan above re-sends the
 		// newest user prompt, so the retry stays meaningful.
 		store.remove(key);
+		if (outcome.conversationId) transientFailures.delete(outcome.conversationId);
 		deps.log?.("conversation-reset", { reason: "unexpected-death" }, "warn");
 	} else if (outcome.conversationId) {
 		store.set(key, {
@@ -1185,6 +1213,29 @@ async function runTurnDriver(
 	if (outcome.aborted) {
 		finalize(stream, blocks, "aborted", "Operation aborted");
 		return;
+	}
+	// Transient-upstream poison loop breaker (see TRANSIENT_UPSTREAM_RE): the
+	// second consecutive transient failure on one conversation goes fresh
+	// (taint + unbind + child recycle) instead of replaying the same prompt
+	// into the same timeout. Runs before the ERROR finalize so the retry pass
+	// already sees the reset binding.
+	{
+		const convId = outcome.conversationId ?? existing?.conversationId;
+		if (outcome.status === "ERROR" && convId && isTransientUpstreamError(outcome.error)) {
+			const n = (transientFailures.get(convId) ?? 0) + 1;
+			if (n >= 2) {
+				transientFailures.delete(convId);
+				deps.driver.taintConversation(convId);
+				store.remove(key);
+				await deps.driver.close("recycle", "transient-timeout-loop");
+				deps.log?.("conversation-reset", { reason: "transient-timeout-loop", failures: n }, "warn");
+			} else {
+				transientFailures.set(convId, n);
+				deps.log?.("transient-failure", { conversation: convId.slice(0, 8), attempt: n }, "info");
+			}
+		} else if (outcome.status === "OK" && convId) {
+			transientFailures.delete(convId);
+		}
 	}
 	if (outcome.status === "ERROR") {
 		finalize(stream, blocks, "error", outcome.error ?? "agy turn failed");

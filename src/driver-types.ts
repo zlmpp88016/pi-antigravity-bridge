@@ -148,6 +148,10 @@ export interface TurnDriver {
 	reentry(): TurnHandle | null;
 	/** Resume turn timers after a parked G9 round-trip settles. */
 	kickIdle(): void;
+	/** Mark a conversation id as resume-poisoned from the outside
+	 *  (provider-level repeated transient failures). Later turns asking for
+	 *  this id start fresh instead of resuming into the same failure. */
+	taintConversation(id: string): void;
 	set onTurnEnd(fn: ((outcome: TurnOutcome) => void) | undefined);
 	snapshot(): DriverSnapshot;
 	close(reason: "recycle" | "shutdown", cause?: string): Promise<void>;
