@@ -259,6 +259,18 @@ function extraArgs(): string[] {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Terminate agy and its children. POSIX: the child leads its own process group
+ *  (it is spawned detached), so signal the negative pid. Windows: the child is
+ *  spawned NOT detached, so there is no group to signal - a negative pid would
+ *  only throw - hence the plain kill (same split as driver.ts #killChild). */
+function killAgy(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(process.platform === "win32" ? pid : -pid, signal);
+	} catch {
+		/* process (group) already gone */
+	}
+}
+
 // --- Registration ----------------------------------------------------------
 
 /** Register the AskAntigravity tool. Call once from the extension entry.
@@ -537,7 +549,14 @@ export async function registerAskAntigravityTool(
 						cwd,
 						stdio: ["ignore", "pipe", "pipe"],
 						shell: false,
-						detached: true,
+						// Windows: never detached. A DETACHED_PROCESS child inherits no
+						// console, so every console program agy later runs (git, its hook
+						// and exec tools) allocates a fresh visible terminal window - one
+						// flash per agy step. windowsHide gives agy a headless console that
+						// its children inherit instead (same as driver.ts). POSIX keeps it
+						// detached so killAgy can signal the whole process group.
+						detached: process.platform !== "win32",
+						windowsHide: true,
 					});
 					proc.stdout?.setEncoding("utf8");
 					proc.stderr?.setEncoding("utf8");
@@ -572,18 +591,10 @@ export async function registerAskAntigravityTool(
 					let timedOut = false;
 
 					const killTree = () => {
-						try {
-							if (proc.pid) process.kill(-proc.pid, "SIGTERM");
-						} catch {
-							/* process group already gone */
-						}
+						if (proc.pid) killAgy(proc.pid, "SIGTERM");
 						if (!sigkillTimer) {
 							sigkillTimer = setTimeout(() => {
-								try {
-									if (proc.pid) process.kill(-proc.pid, "SIGKILL");
-								} catch {
-									/* give up */
-								}
+								if (proc.pid) killAgy(proc.pid, "SIGKILL");
 							}, GRACE_AFTER_TIMEOUT_MS);
 						}
 					};

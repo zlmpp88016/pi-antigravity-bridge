@@ -36,6 +36,7 @@ export function createExecGitOps(): GitOps {
 				cwd,
 				encoding: "utf-8",
 				stdio: ["ignore", "pipe", "ignore"],
+				windowsHide: true,
 			});
 		} catch {
 			return null;

@@ -74,6 +74,7 @@ export async function spawnAgyModelsRaw(binary: string): Promise<string> {
 			const proc = spawn(binary, ["models"], {
 				stdio: ["ignore", "pipe", "ignore"],
 				shell: false,
+				windowsHide: true,
 			});
 			proc.stdout?.setEncoding("utf8");
 			let out = "";
