@@ -67,12 +67,17 @@ import {
 import { mapAgyToolToNative } from "../src/native-tools.js";
 import { Type } from "typebox";
 import { patchStatus, restorePatch } from "../src/patch-cleanup.js";
+import { registerTeammateChildExtensionBestEffort } from "../src/teammate-child.js";
 
 // Last UI seen (session_start / /agy commands). The ACP login URL arrives
 // via the driver log sink, which has no command context; the stash lets that
 // sink toast instead of only logging to stderr. Module scope: both the
 // default export (session_start, log sink) and registerAgyCommand assign it.
 let activeUi: ExtensionUIContext | null = null;
+
+// Teammate child registration for this extension load. Module scope so the
+// session_shutdown handler defined below can release it.
+let teammateChildDispose: (() => void) | undefined;
 
 function resolveAgyBinary(): string {
 	return process.env.AGY_BIN || "agy";
@@ -83,6 +88,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// installed) checks this in-process flag OR the bridge's package.json on disk
 	// and defers. See that extension's isBridgeInstalled().
 	(globalThis as Record<symbol, unknown>)[Symbol.for("pi-antigravity-bridge:active")] = true;
+
+	// Teammate children load only explicitly passed extensions, so the provider
+	// registered below does not exist there and an antigravity/* dispatch dies
+	// with "Model not found". Best effort: the optional teammate package may be
+	// absent, and that must never affect the rest of the bridge.
+	teammateChildDispose = (await registerTeammateChildExtensionBestEffort()).dispose;
 
 	const binary = resolveAgyBinary();
 
@@ -571,6 +582,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// The UI is going away; a later auth-url must fall back to stderr
 		// instead of toasting into a dead UI (where it would be lost).
 		activeUi = null;
+		// Child registration is per load; releasing it here keeps a reload from
+		// stacking stale generations in the teammate registry.
+		const disposeChild = teammateChildDispose;
+		teammateChildDispose = undefined;
+		disposeChild?.();
 		const h = mcpHandle;
 		mcpHandle = null;
 		await h?.close();
